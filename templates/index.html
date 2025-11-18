@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>VMess / VLESS / Trojan / SS → Clash 订阅转换器</title>
+</head>
+<body>
+<h2>输入节点（每行一个）</h2>
+<form id="form">
+    <textarea name="nodes" style="width:500px;height:200px;"></textarea><br><br>
+    <button type="submit">生成订阅链接</button>
+</form>
+
+<br>
+<div id="result" style="font-size:18px;color:blue;"></div>
+
+<script>
+document.getElementById("form").onsubmit = async (e) => {
+    e.preventDefault();
+    let formData = new FormData(e.target);
+    let res = await fetch("/submit", { method:"POST", body:formData });
+    let data = await res.json();
+    document.getElementById("result").innerHTML =
+        "订阅链接：<br><a href='" + data.url + "' target='_blank'>" + data.url + "</a>";
+};
+</script>
+</body>
+</html>
