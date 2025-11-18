@@ -1,131 +1,91 @@
-from flask import Flask, request, jsonify, Response, render_template
-import base64, json, uuid, os
+import json
+from flask import Flask, request, jsonify, send_file
+import yaml
+import uuid
 
 app = Flask(__name__)
-
 DB_FILE = "db.json"
 
+# 读取 db.json
 def load_db():
-    if not os.path.exists(DB_FILE):
-        with open(DB_FILE, "w") as f:
-            f.write("{}")
-    return json.load(open(DB_FILE, "r"))
+    try:
+        with open(DB_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {}
 
-def save_db(data):
-    json.dump(data, open(DB_FILE, "w"), indent=2)
+# 保存 db.json
+def save_db(db):
+    with open(DB_FILE, "w") as f:
+        json.dump(db, f)
 
-### ------------------ 节点解析 ------------------ ###
-def decode_vmess(url):
-    url = url.replace("vmess://", "")
-    padded = url + "=" * (-len(url) % 4)
-    return json.loads(base64.b64decode(padded).decode())
+# 添加策略组和规则
+def add_proxy_groups(yaml_dict):
+    nodes = [p['name'] for p in yaml_dict['proxies']]
+    yaml_dict['proxy-groups'] = [
+        {
+            'name': 'Auto',
+            'type': 'url-test',
+            'proxies': nodes,
+            'url': 'http://www.gstatic.com/generate_204',
+            'interval': 300
+        },
+        {
+            'name': 'Proxy',
+            'type': 'select',
+            'proxies': nodes + ['Auto']
+        }
+    ]
+    yaml_dict['rules'] = [
+        'DOMAIN-SUFFIX,google.com,Auto',
+        'DOMAIN-SUFFIX,facebook.com,Auto',
+        'GEOIP,CN,DIRECT',
+        'MATCH,Proxy'
+    ]
+    return yaml_dict
 
-def decode_ss(url):
-    # ss://method:password@server:port
-    url = url.replace("ss://", "")
-    padded = url + "=" * (-len(url) % 4)
-    decoded = base64.b64decode(padded).decode()
-    method, tail = decoded.split(":", 1)
-    password, tail2 = tail.split("@", 1)
-    server, port = tail2.split(":")
-    return {
-        "type": "ss",
-        "server": server,
-        "port": port,
-        "method": method,
-        "password": password
+# 转换 VMess 链接为 Clash 节点
+def vmess_to_clash(vmess_link):
+    import base64
+    if vmess_link.startswith("vmess://"):
+        vmess_link = vmess_link[8:]
+    data = json.loads(base64.b64decode(vmess_link).decode())
+    node = {
+        'name': data.get('ps', 'vmess-node'),
+        'type': 'vmess',
+        'server': data['add'],
+        'port': int(data['port']),
+        'uuid': data['id'],
+        'alterId': int(data.get('aid', 0)),
+        'cipher': 'auto',
+        'network': data.get('net', 'tcp'),
+        'tls': data.get('tls', 'none'),
+        'skip-cert-verify': True if data.get('tls','none') != 'none' else False,
+        'ws-opts': {
+            'path': data.get('path', ''),
+            'headers': {'Host': data.get('host','')} if data.get('host') else {}
+        } if data.get('net','tcp')=='ws' else {}
     }
+    return node
 
-def decode_trojan(url):
-    url = url.replace("trojan://", "")
-    password, rest = url.split("@", 1)
-    server, port = rest.split(":")
-    return {
-        "type": "trojan",
-        "server": server,
-        "port": port,
-        "password": password
-    }
-
-### ------------------ 转 Clash 节点 ------------------ ###
-def vmess_to_clash(v):
-    return {
-        "name": v.get("ps", "vmess"),
-        "type": "vmess",
-        "server": v["add"],
-        "port": int(v["port"]),
-        "uuid": v["id"],
-        "alterId": int(v.get("aid", 0)),
-        "cipher": "auto",
-        "udp": True,
-        "network": v.get("net", "tcp")
-    }
-
-def ss_to_clash(v):
-    return {
-        "name": "shadowsocks",
-        "type": "ss",
-        "server": v["server"],
-        "port": int(v["port"]),
-        "cipher": v["method"],
-        "password": v["password"],
-        "udp": True
-    }
-
-def trojan_to_clash(v):
-    return {
-        "name": "trojan",
-        "type": "trojan",
-        "server": v["server"],
-        "port": int(v["port"]),
-        "password": v["password"],
-        "udp": True,
-        "sni": ""
-    }
-
-### ------------------ 页面 ------------------ ###
-@app.route("/")
-def index():
-    return render_template("index.html")
-
-### ------------------ 提交节点 → 返回 Token ------------------ ###
-@app.route("/submit", methods=["POST"])
-def submit():
-    nodes = request.form["nodes"].strip().splitlines()
-    token = str(uuid.uuid4())
-
+@app.route("/sub", methods=["POST","GET"])
+def generate_sub():
     db = load_db()
-    db[token] = nodes
-    save_db(db)
+    vmess_links = request.args.get("links") or request.form.get("links")
+    if not vmess_links:
+        return "请提供 vmess 链接", 400
 
-    url = f"{request.host_url}sub/{token}"
-    return jsonify({"ok": True, "url": url})
+    vmess_links = vmess_links.strip().splitlines()
+    proxies = []
+    for link in vmess_links:
+        node = vmess_to_clash(link.strip())
+        proxies.append(node)
 
-### ------------------ Clash 订阅链接 ------------------ ###
-@app.route("/sub/<token>")
-def sub(token):
-    db = load_db()
-    if token not in db:
-        return "Invalid token", 404
+    yaml_dict = {'proxies': proxies}
+    yaml_dict = add_proxy_groups(yaml_dict)
 
-    links = db[token]
+    yaml_data = yaml.dump(yaml_dict, allow_unicode=True)
+    return yaml_data, 200, {'Content-Type': 'text/yaml; charset=utf-8'}
 
-    clash_nodes = []
-    for link in links:
-        if link.startswith("vmess://"):
-            clash_nodes.append(vmess_to_clash(decode_vmess(link)))
-        elif link.startswith("ss://"):
-            clash_nodes.append(ss_to_clash(decode_ss(link)))
-        elif link.startswith("trojan://"):
-            clash_nodes.append(trojan_to_clash(decode_trojan(link)))
-
-    yaml = "proxies:\n"
-    for n in clash_nodes:
-        yaml += f"  - {json.dumps(n, ensure_ascii=False)}\n"
-
-    return Response(yaml, mimetype="text/plain")
-
-### ------------------ 启动 ------------------ ###
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=58000)
-
