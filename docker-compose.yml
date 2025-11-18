@@ -3,7 +3,8 @@ services:
   vmess2clash:
     build: .
     ports:
-      - "8000:8000"
+      - "58000:58000"
     volumes:
       - ./db.json:/app/db.json
     restart: always
+
